@@ -354,7 +354,7 @@ class AlarmService:
 
     async def route(self, method: str, path: str, data: dict) -> tuple[int, dict]:
         if method == "GET" and path == "/health":
-            return 200, {"status": "ok", "version": "0.1.1", "pid": os.getpid(),
+            return 200, {"status": "ok", "version": "0.1.2", "pid": os.getpid(),
                          "managed_by_systemd": bool(os.environ.get("INVOCATION_ID"))}
         if method == "POST" and path == "/v1/service/stop":
             self.stop()

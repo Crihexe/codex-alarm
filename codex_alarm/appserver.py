@@ -41,7 +41,7 @@ class AppServer:
         expected = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
         if not header.startswith(b"HTTP/1.1 101") or f"Sec-WebSocket-Accept: {expected}".lower().encode() not in header.lower():
             raise AppServerError("WebSocket handshake rejected")
-        await self.request("initialize", {"clientInfo": {"name": "codex-alarm", "title": "Codex Alarm", "version": "0.1.1"}})
+        await self.request("initialize", {"clientInfo": {"name": "codex-alarm", "title": "Codex Alarm", "version": "0.1.2"}})
         await self.send({"method": "initialized", "params": {}})
         return self
 

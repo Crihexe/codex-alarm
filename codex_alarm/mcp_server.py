@@ -79,7 +79,7 @@ def handle(message: dict) -> dict | None:
         if method == "initialize":
             result = {"protocolVersion": message.get("params", {}).get("protocolVersion", "2024-11-05"),
                       "capabilities": {"tools": {"listChanged": False}},
-                      "serverInfo": {"name": "codex-alarm", "version": "0.1.1"}}
+                      "serverInfo": {"name": "codex-alarm", "version": "0.1.2"}}
         elif method == "ping":
             result = {}
         elif method == "tools/list":
