@@ -34,8 +34,11 @@ class AlarmService:
         self.socket = socket or api_socket()
         self.locks: dict[str, asyncio.Lock] = {}
         self.running_checkers: set[str] = set()
+        self.dispatching_events: set[str] = set()
         self.checker_tasks: set[asyncio.Task] = set()
+        self.delivery_tasks: set[asyncio.Task] = set()
         self.turn_tasks: set[asyncio.Task] = set()
+        self.scheduler_task: asyncio.Task | None = None
         self.server: asyncio.AbstractServer | None = None
         self.stopping = asyncio.Event()
 
@@ -55,15 +58,22 @@ class AlarmService:
                 self.socket.unlink(missing_ok=True)
         self.server = await asyncio.start_unix_server(self.handle_client, self.socket)
         os.chmod(self.socket, 0o600)
-        asyncio.create_task(self.scheduler_loop())
+        for event in self.store.inflight_events():
+            task = asyncio.create_task(self.watch_turn(event["thread_id"], event["event_id"], event["turn_id"]))
+            self.turn_tasks.add(task)
+            task.add_done_callback(self.turn_tasks.discard)
+        self.scheduler_task = asyncio.create_task(self.scheduler_loop())
 
     async def run(self) -> None:
         await self.start()
         await self.stopping.wait()
         self.server.close()
         await self.server.wait_closed()
-        for task in list(self.checker_tasks | self.turn_tasks):
+        if self.scheduler_task:
+            await self.scheduler_task
+        for task in list(self.checker_tasks | self.delivery_tasks | self.turn_tasks):
             task.cancel()
+        await asyncio.gather(*(self.checker_tasks | self.delivery_tasks | self.turn_tasks), return_exceptions=True)
         self.socket.unlink(missing_ok=True)
         self.store.close()
 
@@ -78,12 +88,17 @@ class AlarmService:
                 for alarm in self.store.due_alarms(now):
                     if alarm["deadline_at"] <= now:
                         self.store.deadline_alarm(alarm["alarm_id"])
-                    elif alarm["alarm_id"] not in self.running_checkers:
+                    elif alarm["alarm_id"] not in self.running_checkers and len(self.running_checkers) < 8:
+                        self.running_checkers.add(alarm["alarm_id"])
                         task = asyncio.create_task(self.run_checker(alarm))
                         self.checker_tasks.add(task)
                         task.add_done_callback(self.checker_tasks.discard)
                 for event in self.store.due_events(now):
-                    await self.dispatch(event)
+                    if event["event_id"] not in self.dispatching_events and len(self.dispatching_events) < 8:
+                        self.dispatching_events.add(event["event_id"])
+                        task = asyncio.create_task(self.dispatch_guarded(event))
+                        self.delivery_tasks.add(task)
+                        task.add_done_callback(self.delivery_tasks.discard)
             except Exception:
                 # One malformed checker or App Server failure must not kill the scheduler.
                 import traceback
@@ -95,7 +110,6 @@ class AlarmService:
 
     async def run_checker(self, alarm: dict) -> None:
         alarm_id = alarm["alarm_id"]
-        self.running_checkers.add(alarm_id)
         command = (["python3", "-c", alarm["source"]] if alarm["language"] == "python"
                    else ["bash", "-c", alarm["source"]])
         state, detail = "error", "checker did not run"
@@ -144,12 +158,60 @@ class AlarmService:
             self.running_checkers.discard(alarm_id)
         self.store.check_result(alarm_id, state, detail)
 
+    async def dispatch_guarded(self, event: dict) -> None:
+        try:
+            await self.dispatch(event)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            if event["policy"] == "defer_until_available":
+                self.store.set_event(event["event_id"], "deferred", "DISPATCH_ERROR", retry_after=3)
+            else:
+                self.store.set_event(event["event_id"], "failed", "DISPATCH_ERROR")
+        finally:
+            self.dispatching_events.discard(event["event_id"])
+
     async def availability(self, thread_id: str) -> str:
         try:
             async with AppServer() as app:
                 return await app.thread_status(thread_id)
         except (OSError, AppServerError, asyncio.TimeoutError, asyncio.IncompleteReadError):
             return "notLoaded"
+
+    async def pause_goal_for_alarm(self, thread_id: str, alarm_id: str) -> bool:
+        try:
+            async with AppServer() as app:
+                goal = await app.goal(thread_id)
+                if goal and goal.get("status") == "active":
+                    paused = await app.set_goal_status(thread_id, "paused")
+                    self.store.set_goal_pause(alarm_id, paused)
+                    return True
+                return False
+        except AppServerError as exc:
+            if "goals feature is disabled" in str(exc):
+                return False
+            self.store.cancel_alarm(thread_id, alarm_id)
+            raise AlarmError("GOAL_PAUSE_FAILED", "could not pause active goal", 500, True) from exc
+        except (OSError, asyncio.TimeoutError) as exc:
+            self.store.cancel_alarm(thread_id, alarm_id)
+            raise AlarmError("GOAL_PAUSE_FAILED", "App Server unavailable while pausing goal", 500, True) from exc
+
+    async def resume_alarm_goal(self, app: AppServer, alarm_id: str) -> None:
+        alarm = self.store.alarm(alarm_id)
+        if not alarm or alarm["goal_paused_at"] is None:
+            return
+        thread = self.store.thread(alarm["thread_id"])
+        if not thread or thread["interrupted"] or thread["suspended"]:
+            return
+        try:
+            goal = await app.goal(alarm["thread_id"])
+            if (goal and goal.get("status") == "paused"
+                    and goal.get("updatedAt") == alarm["goal_paused_at"]
+                    and goal.get("objective") == alarm["goal_objective"]):
+                await app.set_goal_status(alarm["thread_id"], "active")
+        except (AppServerError, asyncio.TimeoutError):
+            # The event is already in the model turn. A failed goal resume must not duplicate it.
+            pass
 
     async def dispatch(self, event: dict) -> None:
         thread_id = event["thread_id"]
@@ -167,6 +229,15 @@ class AlarmService:
                 else:
                     self.store.set_event(event["event_id"], "failed", "CHAT_SUSPENDED")
                 return
+            if thread["interrupted"]:
+                try:
+                    async with AppServer() as goal_app:
+                        goal = await goal_app.goal(thread_id)
+                    if goal and goal.get("status") == "active":
+                        self.store.set_interrupted(thread_id, False)
+                        thread = self.store.thread(thread_id)
+                except (OSError, AppServerError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+                    pass
             if thread["interrupted"]:
                 if event["policy"] == "defer_until_available":
                     self.store.set_event(event["event_id"], "deferred", "USER_INTERRUPTED", retry_after=2)
@@ -203,10 +274,11 @@ class AlarmService:
                           "origin": event["origin"], "payload": json.loads(event["payload"])}
                 turn_id = await app.wake(thread_id, output)
                 self.store.set_event(event["event_id"], "submitted", turn_id=turn_id, turn_state="in_progress")
-                task = asyncio.create_task(self.watch_turn(app, event["event_id"], turn_id))
+                if event["alarm_id"]:
+                    await self.resume_alarm_goal(app, event["alarm_id"])
+                task = asyncio.create_task(self.watch_turn(thread_id, event["event_id"], turn_id))
                 self.turn_tasks.add(task)
                 task.add_done_callback(self.turn_tasks.discard)
-                app = None
             except (OSError, AppServerError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
                 if event["policy"] == "defer_until_available":
                     self.store.set_event(event["event_id"], "deferred", type(exc).__name__, retry_after=3)
@@ -216,14 +288,25 @@ class AlarmService:
                 if app:
                     await app.__aexit__(None, None, None)
 
-    async def watch_turn(self, app: AppServer, event_id: str, turn_id: str) -> None:
-        try:
-            status = await app.wait_turn(turn_id)
-            self.store.set_turn_state(event_id, status if status in ("completed", "interrupted", "failed") else "failed")
-        except (OSError, AppServerError, asyncio.TimeoutError, asyncio.IncompleteReadError):
-            self.store.set_turn_state(event_id, "failed")
-        finally:
-            await app.__aexit__(None, None, None)
+    async def watch_turn(self, thread_id: str, event_id: str, turn_id: str) -> None:
+        attempt = 0
+        while not self.stopping.is_set():
+            try:
+                async with AppServer() as app:
+                    thread_state = await app.thread_status(thread_id)
+                    status = (await app.turn_status(thread_id, turn_id)
+                              if thread_state != "active" or attempt % 10 == 0 else None)
+                if status in ("completed", "interrupted", "failed"):
+                    self.store.set_turn_state(event_id, status)
+                    return
+            except AppServerError as exc:
+                if "not found" in str(exc).lower():
+                    self.store.set_turn_state(event_id, "failed")
+                    return
+            except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+                pass
+            attempt += 1
+            await asyncio.sleep(3)
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -271,7 +354,11 @@ class AlarmService:
 
     async def route(self, method: str, path: str, data: dict) -> tuple[int, dict]:
         if method == "GET" and path == "/health":
-            return 200, {"status": "ok", "version": "0.1.0"}
+            return 200, {"status": "ok", "version": "0.1.0", "pid": os.getpid(),
+                         "managed_by_systemd": bool(os.environ.get("INVOCATION_ID"))}
+        if method == "POST" and path == "/v1/service/stop":
+            self.stop()
+            return 200, {"stopping": True}
         if method == "POST" and path == "/v1/threads/register":
             thread_id = data.get("thread_id")
             if not isinstance(thread_id, str) or not thread_id:
@@ -324,16 +411,30 @@ class AlarmService:
                 timeout_ms = wait.get("timeout_ms", 0)
                 if not isinstance(timeout_ms, int) or not 0 <= timeout_ms <= 30000:
                     raise AlarmError("BAD_REQUEST", "wait.timeout_ms must be 0..30000")
-            thread = self.store.thread(thread_id)
-            if policy == "allow_headless" and not thread["headless"]:
-                raise AlarmError("HEADLESS_DISABLED", "headless mode is disabled for recipient", 403)
-            if thread["suspended"] and policy != "defer_until_available":
-                raise AlarmError("AGENT_UNAVAILABLE", "CHAT_SUSPENDED", 409, True)
-            if policy == "require_available" and (thread["interrupted"] or await self.availability(thread_id) == "notLoaded"):
-                raise AlarmError("AGENT_UNAVAILABLE", "USER_INTERRUPTED" if thread["interrupted"] else "THREAD_NOT_LOADED", 409, True)
             if "expires_at" in data:
                 data = {**data, "expires_at": timestamp(data["expires_at"])}
-            receipt = self.store.publish(thread_id, data)
+            thread = self.store.thread(thread_id)
+            existing = self.store.event(data.get("event_id")) if isinstance(data.get("event_id"), str) else None
+            if existing:
+                receipt = self.store.publish(thread_id, data)
+            else:
+                if policy == "allow_headless" and not thread["headless"]:
+                    raise AlarmError("HEADLESS_DISABLED", "headless mode is disabled for recipient", 403)
+                if thread["suspended"] and policy != "defer_until_available":
+                    raise AlarmError("AGENT_UNAVAILABLE", "CHAT_SUSPENDED", 409, True)
+                if policy == "require_available" and thread["interrupted"]:
+                    raise AlarmError("AGENT_UNAVAILABLE", "USER_INTERRUPTED", 409, True)
+                availability = (await self.availability(thread_id)
+                                if policy in ("require_available", "defer_until_available")
+                                and not thread["suspended"] and not thread["interrupted"] else None)
+                if policy == "require_available" and availability == "notLoaded":
+                    raise AlarmError("AGENT_UNAVAILABLE", "THREAD_NOT_LOADED", 409, True)
+                initial_reason = ("CHAT_SUSPENDED" if thread["suspended"] else
+                                  "USER_INTERRUPTED" if thread["interrupted"] else
+                                  "THREAD_NOT_LOADED" if availability == "notLoaded" else None)
+                receipt = self.store.publish(thread_id, data,
+                    initial_state="deferred" if policy == "defer_until_available" and initial_reason else "queued",
+                    initial_reason=initial_reason if policy == "defer_until_available" else None)
             if wait:
                 end = time.monotonic() + timeout_ms / 1000
                 while time.monotonic() < end:
@@ -349,7 +450,10 @@ class AlarmService:
                 raise AlarmError("MISSING_THREAD_CONTEXT", str(exc), 403) from exc
             if "deadline_at" in data:
                 data["deadline_at"] = timestamp(data["deadline_at"])
-            return 200, self.store.arm(thread_id, data)
+            result = self.store.arm(thread_id, data)
+            if data.get("mode") == "sleep" and not result["idempotent"]:
+                result["goal_paused"] = await self.pause_goal_for_alarm(thread_id, result["alarm_id"])
+            return 200, result
         if method == "POST" and path == "/v1/alarms/list":
             try:
                 thread_id = verified_context(data, "list")

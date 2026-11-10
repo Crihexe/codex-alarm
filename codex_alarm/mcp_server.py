@@ -32,7 +32,7 @@ TOOLS = [
          "timeout_seconds": {"type": "number", "description": "Maximum runtime of one check; must be below interval."},
          "deadline_at": {"type": "string", "description": "Mandatory RFC 3339 backup deadline with timezone."},
          "wake_message": {"type": "string", "description": "What you need to know when woken."},
-         "mode": {"type": "string", "enum": ["continue", "sleep"], "description": "Continue independent work or finish the turn and wait."},
+         "mode": {"type": "string", "enum": ["continue", "sleep"], "description": "Continue independent work, or pause an active goal and finish the turn to await the event."},
          "allow_parallel": {"type": "boolean", "description": "Required with expected_revision when active alarms already exist."},
          "expected_revision": {"type": "integer", "description": "Revision returned by list, to confirm an additional alarm."},
      }, ["language", "source", "cwd", "interval_seconds", "deadline_at", "wake_message"])},

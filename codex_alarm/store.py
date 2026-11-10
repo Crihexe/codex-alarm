@@ -58,6 +58,8 @@ class Store:
                 wake_message TEXT NOT NULL,
                 mode TEXT NOT NULL,
                 state TEXT NOT NULL,
+                goal_paused_at INTEGER,
+                goal_objective TEXT,
                 last_detail TEXT,
                 last_error TEXT,
                 created_at REAL NOT NULL
@@ -83,6 +85,11 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS events_due ON events(state, next_attempt_at);
         """)
+        self.db.commit()
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(alarms)")}
+        for name, kind in (("goal_paused_at", "INTEGER"), ("goal_objective", "TEXT")):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE alarms ADD COLUMN {name} {kind}")
         self.db.commit()
 
     def close(self) -> None:
@@ -203,10 +210,19 @@ class Store:
         return {"alarm_id": alarm_id, "state": "armed", "idempotent": False,
                 "revision": self.thread(thread_id)["revision"]}
 
-    def due_alarms(self, now: float, limit: int = 32) -> list[dict]:
+    def due_alarms(self, now: float, limit: int = 128) -> list[dict]:
         rows = self.db.execute("SELECT * FROM alarms WHERE state='armed' AND (next_check_at<=? OR deadline_at<=?) ORDER BY next_check_at LIMIT ?",
                                (now, now, limit)).fetchall()
         return [dict(r) for r in rows]
+
+    def set_goal_pause(self, alarm_id: str, goal: dict) -> None:
+        with self.db:
+            self.db.execute("UPDATE alarms SET goal_paused_at=?, goal_objective=? WHERE alarm_id=?",
+                            (goal.get("updatedAt"), goal.get("objective"), alarm_id))
+
+    def alarm(self, alarm_id: str) -> dict | None:
+        row = self.db.execute("SELECT * FROM alarms WHERE alarm_id=?", (alarm_id,)).fetchone()
+        return dict(row) if row else None
 
     def check_result(self, alarm_id: str, state: str, detail: str = "") -> None:
         row = self.db.execute("SELECT * FROM alarms WHERE alarm_id=?", (alarm_id,)).fetchone()
@@ -285,7 +301,8 @@ class Store:
                 "turn": {"state": row["turn_state"], "id": row["turn_id"]},
                 "status_url": "/v1/events/" + quote(event_id, safe="")}
 
-    def publish(self, thread_id: str, args: dict) -> dict:
+    def publish(self, thread_id: str, args: dict, initial_state: str = "queued",
+                initial_reason: str | None = None) -> dict:
         event_id = args.get("event_id")
         kind = args.get("kind")
         payload = args.get("payload")
@@ -315,12 +332,18 @@ class Store:
             self.db.execute("""INSERT INTO events(event_id,thread_id,kind,payload,policy,origin,fingerprint,
                 expires_at,state,next_attempt_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (event_id, thread_id, kind, canonical(payload), policy, "external", fingerprint,
-                 expires_at, "queued", now, now, now))
+                 expires_at, initial_state, now, now, now))
+            if initial_reason:
+                self.db.execute("UPDATE events SET reason=? WHERE event_id=?", (initial_reason, event_id))
         return self.receipt(event_id)
 
     def due_events(self, now: float, limit: int = 32) -> list[dict]:
         rows = self.db.execute("SELECT * FROM events WHERE state IN ('queued','deferred') AND next_attempt_at<=? ORDER BY created_at LIMIT ?",
                                (now, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def inflight_events(self) -> list[dict]:
+        rows = self.db.execute("SELECT event_id, thread_id, turn_id FROM events WHERE state='submitted' AND turn_state='in_progress' AND turn_id IS NOT NULL").fetchall()
         return [dict(r) for r in rows]
 
     def set_event(self, event_id: str, state: str, reason: str | None = None,
@@ -330,6 +353,11 @@ class Store:
             self.db.execute("""UPDATE events SET state=?, reason=?, turn_id=COALESCE(?,turn_id),
                 turn_state=COALESCE(?,turn_state), next_attempt_at=?, updated_at=? WHERE event_id=?""",
                 (state, reason, turn_id, turn_state, now + retry_after, now, event_id))
+            if state == "submitted":
+                row = self.db.execute("SELECT alarm_id, thread_id FROM events WHERE event_id=?", (event_id,)).fetchone()
+                if row and row["alarm_id"]:
+                    self.db.execute("UPDATE alarms SET state='delivered' WHERE alarm_id=? AND state='ready'", (row["alarm_id"],))
+                    self.db.execute("UPDATE threads SET revision=revision+1 WHERE thread_id=?", (row["thread_id"],))
 
     def set_turn_state(self, event_id: str, state: str) -> None:
         with self.db:

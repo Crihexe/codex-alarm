@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -19,20 +20,64 @@ def plugin_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def ensure_cli() -> Path:
+def ensure_cli() -> tuple[Path, bool]:
     target = plugin_root() / "bin" / "codex-alarm"
     binary_dir = Path.home() / ".local" / "bin"
     binary_dir.mkdir(parents=True, exist_ok=True)
     link = binary_dir / "codex-alarm"
+    changed = False
     if link.is_symlink():
         if link.resolve() != target:
             link.unlink()
+            changed = True
     elif link.exists():
-        # Never overwrite a real user executable.
-        return link
+        raise RuntimeError(f"{link} already exists and is not managed by codex-alarm")
     if not link.exists():
         link.symlink_to(target)
-    return link
+        changed = True
+    return link, changed
+
+
+def user_service_unit(binary: Path) -> str:
+    def quoted(value: str) -> str:
+        if "\n" in value or "\r" in value:
+            raise ValueError("systemd path contains newline")
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    environment = "".join(
+        f"Environment={quoted(key + '=' + os.environ[key])}\n"
+        for key in ("CODEX_HOME", "CODEX_ALARM_STATE_DIR", "CODEX_ALARM_RUNTIME_DIR")
+        if key in os.environ
+    )
+    return ("[Unit]\nDescription=Codex Alarm scheduler\nStartLimitIntervalSec=0\n\n"
+            "[Service]\nType=simple\n"
+            + environment + f"ExecStart={quoted(str(binary))} serve\n"
+            "Restart=always\nRestartSec=2\n\n"
+            "[Install]\nWantedBy=default.target\n")
+
+
+def ensure_user_service(binary: Path, cli_changed: bool = False) -> bool:
+    if os.environ.get("CODEX_ALARM_NO_SYSTEMD") == "1" or not shutil.which("systemctl"):
+        return False
+    probe = subprocess.run(["systemctl", "--user", "is-system-running"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if probe.returncode not in (0, 1):  # degraded is usable; offline is not.
+        return False
+    directory = Path.home() / ".config" / "systemd" / "user"
+    directory.mkdir(parents=True, exist_ok=True)
+    unit = directory / "codex-alarm.service"
+    content = user_service_unit(binary)
+    changed = not unit.exists() or unit.read_text() != content
+    if changed:
+        unit.write_text(content)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    subprocess.run(["systemctl", "--user", "enable", "codex-alarm.service"], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    action = "restart" if changed or cli_changed else "start"
+    subprocess.run(["systemctl", "--user", action, "codex-alarm.service"], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return True
 
 
 def ensure_unload_zero() -> bool:
@@ -79,6 +124,15 @@ def ensure_service() -> None:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if health():
             return
+        unit = Path.home() / ".config" / "systemd" / "user" / "codex-alarm.service"
+        if unit.exists() and os.environ.get("CODEX_ALARM_NO_SYSTEMD") != "1" and shutil.which("systemctl"):
+            subprocess.run(["systemctl", "--user", "start", "codex-alarm.service"], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            for _ in range(50):
+                if health():
+                    return
+                time.sleep(0.1)
+            raise RuntimeError("systemd started codex-alarm but its API did not become ready")
         log_path = directory / "service.log"
         with log_path.open("ab") as log:
             subprocess.Popen([sys.executable, str(plugin_root() / "bin" / "codex-alarm"), "serve"],
@@ -93,7 +147,28 @@ def ensure_service() -> None:
 
 def setup() -> dict:
     ensure_key()
-    binary = ensure_cli()
+    binary, changed_cli = ensure_cli()
     changed = ensure_unload_zero()
+    managed = ensure_user_service(binary, changed_cli)
     ensure_service()
-    return {"service": "running", "command": str(binary), "unload_delay_set": changed}
+    return {"service": "running", "managed_by_systemd": managed,
+            "command": str(binary), "unload_delay_set": changed}
+
+
+def uninstall() -> dict:
+    binary = Path.home() / ".local" / "bin" / "codex-alarm"
+    unit = Path.home() / ".config" / "systemd" / "user" / "codex-alarm.service"
+    if unit.exists() and str(binary) in unit.read_text() and "Description=Codex Alarm scheduler" in unit.read_text():
+        subprocess.run(["systemctl", "--user", "disable", "--now", "codex-alarm.service"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        unit.unlink()
+        subprocess.run(["systemctl", "--user", "daemon-reload"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    elif health():
+        try:
+            request("POST", "/v1/service/stop", {})
+        except (OSError, ValueError):
+            pass
+    if binary.is_symlink() and binary.resolve() == plugin_root() / "bin" / "codex-alarm":
+        binary.unlink()
+    return {"service": "removed", "state_retained": str(state_dir())}

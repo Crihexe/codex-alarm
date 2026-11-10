@@ -7,7 +7,7 @@ description: Use persistent alarms to wait for long builds or other conditions, 
 
 Use `codex_alarm.arm` when you expect a condition to take long enough that repeated model-driven polling would waste time. Choose a checker that prints one JSON object with `state` equal to `pending`, `done`, or `error`. The checker can call SSH and should inspect a durable result such as a log, status file, or exit code. Give every alarm a backup deadline.
 
-The tool returns an alarm ID. If you can do independent work, continue working. If you need to wait, finish the turn after arming. For an active goal, pause it before finishing the turn so it does not continue on its own; on waking, inspect the event and resume the same goal when appropriate. Do not treat a user interruption or a manual goal pause as permission to continue.
+The tool returns an alarm ID. If you can do independent work, use `mode: continue` and keep working. If you need to wait, use `mode: sleep` and finish the turn after arming. Sleep mode pauses an active goal through Codex; on waking, it resumes that same goal only if its recorded state is unchanged. If the goal was edited or manually paused, inspect it and follow the user's latest intent. Do not treat a user interruption as permission to continue.
 
 Use `codex_alarm.list` before creating another alarm after compaction or when you may already have one. Multiple alarms are supported, but creating an additional one requires the revision returned by `list` and `allow_parallel: true`. `codex_alarm.cancel` cancels a specific alarm.
 

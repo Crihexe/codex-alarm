@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
-from .bootstrap import ensure_service, setup
+from .bootstrap import ensure_service, setup, uninstall
 from .client import APIError, request
 from .service import serve
 
@@ -27,6 +27,7 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("serve", help=argparse.SUPPRESS)
     commands.add_parser("setup", help="Set up the plugin and start its service")
+    commands.add_parser("uninstall", help="Stop and remove the user service, retaining alarm data")
     commands.add_parser("health", help="Check the local service")
     stop = commands.add_parser("stop-chat", help="Cancel alarms and suspend the current chat")
     stop.add_argument("--thread", help="Thread ID; defaults to the current Codex chat")
@@ -55,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "setup":
             result = setup()
+        elif args.command == "uninstall":
+            result = uninstall()
         else:
             ensure_service()
             if args.command == "health":

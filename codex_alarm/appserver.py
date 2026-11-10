@@ -125,7 +125,12 @@ class AppServer:
                 self.notifications.append(message)
 
     async def thread_status(self, thread_id: str) -> str:
-        result = await self.request("thread/read", {"threadId": thread_id})
+        try:
+            result = await self.request("thread/read", {"threadId": thread_id})
+        except AppServerError as exc:
+            if "thread not loaded" in str(exc).lower():
+                return "notLoaded"
+            raise
         return result.get("thread", {}).get("status", {}).get("type", "notLoaded")
 
     async def wake(self, thread_id: str, output: dict) -> str:
@@ -143,6 +148,40 @@ class AppServer:
 
     async def interrupt(self, thread_id: str, turn_id: str) -> None:
         await self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+
+    async def goal(self, thread_id: str) -> dict | None:
+        result = await self.request("thread/goal/get", {"threadId": thread_id})
+        return result.get("goal")
+
+    async def set_goal_status(self, thread_id: str, status: str) -> dict:
+        result = await self.request("thread/goal/set", {"threadId": thread_id,
+                                                        "status": status, "origin": "automatic"})
+        return result.get("goal", {})
+
+    async def turn_status(self, thread_id: str, turn_id: str) -> str | None:
+        cursor = None
+        for _ in range(10):
+            params = {"threadId": thread_id, "limit": 50, "itemsView": "notLoaded"}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                result = await self.request("thread/turns/list", params)
+            except AppServerError as exc:
+                if "not supported" not in str(exc):
+                    raise
+                # The installed Codex version still uses legacy thread history.
+                result = await self.request("thread/read", {"threadId": thread_id, "includeTurns": True})
+                for turn in result.get("thread", {}).get("turns", []):
+                    if turn.get("id") == turn_id:
+                        return turn.get("status")
+                return None
+            for turn in result.get("data", []):
+                if turn.get("id") == turn_id:
+                    return turn.get("status")
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+        return None
 
     async def wait_turn(self, turn_id: str, timeout: float = 3600) -> str:
         for message in self.notifications:
