@@ -1,12 +1,14 @@
 """Delivery policies against a controllable App Server boundary."""
 
 import asyncio
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from codex_alarm.hooks import pre_tool_use
 from codex_alarm.service import AlarmService
 from codex_alarm.store import AlarmError, Store
 
@@ -117,6 +119,22 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.store.check_result(alarm["alarm_id"], "done")
         await self.service.dispatch(self.store.event("alarm:" + alarm["alarm_id"]))
         self.assertEqual(FakeAppServer.goal_data["status"], "paused")
+
+    async def test_hook_context_binds_alarm_to_actual_chat(self):
+        with patch.dict(os.environ, {"CODEX_ALARM_STATE_DIR": self.temp.name}):
+            call = {"session_id": "chat-a", "tool_use_id": "call-7",
+                    "tool_name": "mcp__codex_alarm__arm", "tool_input": {
+                        "language": "python", "source": "print('{}')", "cwd": self.temp.name,
+                        "interval_seconds": 10, "deadline_at": time.time() + 60,
+                        "wake_message": "Check result"}}
+            signed = pre_tool_use(call)["hookSpecificOutput"]["updatedInput"]
+            _, result = await self.service.route("POST", "/v1/alarms", signed)
+            self.assertEqual(self.store.alarm(result["alarm_id"])["thread_id"], "chat-a")
+            with self.assertRaises(AlarmError) as context:
+                await self.service.route("POST", "/v1/alarms", signed | {"_thread_id": "chat-b"})
+            self.assertEqual(context.exception.code, "MISSING_THREAD_CONTEXT")
+            call["agent_id"] = "subagent-1"
+            self.assertEqual(pre_tool_use(call)["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
 if __name__ == "__main__":

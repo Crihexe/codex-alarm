@@ -82,8 +82,11 @@ class AppServer:
     async def receive(self) -> dict:
         if not self.reader:
             raise AppServerError("not connected")
+        fragments = bytearray()
+        fragmented = False
         while True:
             first = await self.reader.readexactly(2)
+            final = bool(first[0] & 0x80)
             opcode = first[0] & 15
             length = first[1] & 127
             masked = bool(first[1] & 128)
@@ -91,7 +94,7 @@ class AppServer:
                 length = struct.unpack("!H", await self.reader.readexactly(2))[0]
             elif length == 127:
                 length = struct.unpack("!Q", await self.reader.readexactly(8))[0]
-            if length > 8 * 1024 * 1024:
+            if length > 64 * 1024 * 1024 or len(fragments) + length > 64 * 1024 * 1024:
                 raise AppServerError("oversized WebSocket frame")
             mask = await self.reader.readexactly(4) if masked else b""
             payload = await self.reader.readexactly(length)
@@ -104,10 +107,17 @@ class AppServer:
                 continue
             if opcode == 10:
                 continue
-            if opcode != 1:
+            if opcode == 1:
+                if fragmented:
+                    raise AppServerError("new WebSocket message before continuation")
+                fragmented = True
+            elif opcode != 0 or not fragmented:
                 raise AppServerError(f"unsupported WebSocket opcode {opcode}")
+            fragments.extend(payload)
+            if not final:
+                continue
             try:
-                return json.loads(payload)
+                return json.loads(fragments)
             except json.JSONDecodeError as exc:
                 raise AppServerError("invalid JSON from App Server") from exc
 

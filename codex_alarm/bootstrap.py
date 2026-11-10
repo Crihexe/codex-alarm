@@ -46,7 +46,8 @@ def user_service_unit(binary: Path) -> str:
 
     environment = "".join(
         f"Environment={quoted(key + '=' + os.environ[key])}\n"
-        for key in ("CODEX_HOME", "CODEX_ALARM_STATE_DIR", "CODEX_ALARM_RUNTIME_DIR")
+        for key in ("CODEX_HOME", "CODEX_ALARM_STATE_DIR", "CODEX_ALARM_RUNTIME_DIR",
+                    "XDG_RUNTIME_DIR", "XDG_STATE_HOME")
         if key in os.environ
     )
     return ("[Unit]\nDescription=Codex Alarm scheduler\nStartLimitIntervalSec=0\n\n"

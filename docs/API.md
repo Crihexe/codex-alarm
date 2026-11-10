@@ -6,7 +6,7 @@ Versione `v1`. Il servizio è incluso nel plugin e offre HTTP su un socket Unix 
 
 La modalità predefinita è interattiva: il controller non chiama `thread/resume` quando il thread è scaricato. La verifica pubblica disponibile è lo stato `loaded`/`notLoaded` del thread App Server, **non** la presenza certa di una finestra TUI. `thread_unload_delay_secs = 0` fa scaricare presto un thread inattivo senza sottoscrittori, ma un thread attivo resta caricato anche dopo la chiusura della TUI. La corsa fra verifica e consegna è quindi una limitazione esplicita. La ripresa autonoma senza TUI è disabilitata per impostazione predefinita e configurabile per destinatario.
 
-L'utente può eseguire `!codex-alarm stop-chat` nella TUI prima di uscire. Il comando cancella le sveglie della chat corrente e ne sospende la consegna fino alla riapertura; non tocca altre chat. La risposta include il numero di allarmi cancellati, `in_flight` e `safe_to_exit`. L'utente attende `safe_to_exit: true` prima di uscire; se un turno già avviato dalla sveglia non può essere fermato in sicurezza, riceve `false` con il motivo. Durante la sospensione, `require_available` e `allow_headless` rispondono `409 AGENT_UNAVAILABLE` con `reason = CHAT_SUSPENDED`, mentre `defer_until_available` conserva l'evento. La sospensione esplicita dell'utente prevale sull'opzione autonoma. Un evento già consegnato prima del comando non può essere ritirato retroattivamente.
+L'utente può eseguire `!codex-alarm stop-chat` nella TUI prima di uscire. Il comando cancella le sveglie della chat corrente e ne sospende la consegna fino alla riapertura; non tocca altre chat. La risposta include il numero di allarmi cancellati, `in_flight` e `safe_to_exit`. L'utente attende `safe_to_exit: true` prima di uscire; se un turno già avviato da una sveglia o da un evento esterno è in corso, riceve `false` e il conteggio `in_flight`. Durante la sospensione, `require_available` e `allow_headless` rispondono `409 AGENT_UNAVAILABLE` con `reason = CHAT_SUSPENDED`, mentre `defer_until_available` conserva l'evento. La sospensione esplicita dell'utente prevale sull'opzione autonoma. Un evento già consegnato prima del comando non può essere ritirato retroattivamente.
 
 ## Pubblicare un evento
 
@@ -22,7 +22,7 @@ Content-Type: application/json
   "kind": "scan.finished",
   "payload": {"message": "La scansione è terminata", "report_id": "scan-42"},
   "delivery_policy": "defer_until_available",
-  "expires_at": "2026-11-11T12:00:00Z",
+  "expires_at": "2027-11-11T12:00:00Z",
   "wait": {"for": "delivery_submitted", "timeout_ms": 30000}
 }
 ```
@@ -74,4 +74,26 @@ Formato comune:
 
 Inviare di nuovo lo stesso `event_id` con contenuto identico restituisce la ricevuta esistente, senza creare una seconda sveglia. Un errore prima dell'ammissione non riserva l'ID; si può ritentare lo stesso evento quando l'agente torna disponibile. Se un evento `require_available` è stato accettato con `202` e poi fallisce per la corsa di chiusura, il client deve consultare lo stato e pubblicare un nuovo tentativo con un nuovo `event_id` se vuole ritentare. Nessuna risposta sincrona può garantire che la TUI resti aperta dopo l'ammissione.
 
-Se il processo API non è in esecuzione, il client riceve un errore di connessione al socket, non una risposta JSON `AGENT_UNAVAILABLE`. Il plugin avvia e gestisce il servizio al primo uso; per integrazioni esterne è previsto anche un comando client che può verificarne o avviarne la disponibilità.
+Se il processo API non è in esecuzione, il client riceve un errore di connessione al socket, non una risposta JSON `AGENT_UNAVAILABLE`. Il comando `codex-alarm health` lo avvia se necessario e ne verifica la disponibilità.
+
+## Socket ed endpoint di gestione
+
+L'API ascolta su `$XDG_RUNTIME_DIR/codex-alarm/api.sock`, oppure `~/.local/state/codex-alarm/run/api.sock` se `XDG_RUNTIME_DIR` manca. Il socket è accessibile solo all'utente (`0600`); non espone una porta TCP. Per inviare un evento senza usare il client incluso:
+
+```sh
+curl --unix-socket "$XDG_RUNTIME_DIR/codex-alarm/api.sock" \
+  -H 'Content-Type: application/json' -d @event.json \
+  http://localhost/v1/events
+```
+
+| Metodo e percorso | Scopo |
+| --- | --- |
+| `GET /health` | Versione, PID e stato di supervisione del servizio. |
+| `POST /v1/threads/alias` | Registra `{"thread_id":"...","alias":"..."}`; un alias appartiene a un solo thread. |
+| `POST /v1/threads/headless` | Imposta `{"thread_id":"...","enabled":true|false}` per l'opt-in alla ripresa autonoma. |
+| `POST /v1/threads/stop` | Sospende una chat, cancella le sveglie interne non consegnate e restituisce `safe_to_exit`. |
+| `POST /v1/threads/resume` | Rimuove la sospensione manuale senza ricreare gli allarmi cancellati. |
+| `GET /v1/threads/{thread_id}/alarms` | Elenca gli allarmi ancora attivi e la revisione. |
+| `GET /v1/events/{event_id}` | Ricevuta corrente di un evento. |
+
+Gli endpoint `register`, `interrupt` e `user-prompt` sono usati dagli hook del plugin. Gli endpoint MCP degli allarmi richiedono un contesto HMAC generato da `PreToolUse`; un client esterno deve usare `POST /v1/events`.
