@@ -24,6 +24,8 @@ systemctl --user status codex-alarm.service
 
 Se `systemd --user` non è disponibile, il plugin avvia un processo separato e conserva gli allarmi in SQLite; in quel caso il riavvio automatico dopo un crash non è garantito. `codex-alarm uninstall` rimuove comando e servizio, conservando il database. La disinstallazione del plugin da Codex è separata: `codex plugin remove codex-alarm@crihexe-codex-alarm`.
 
+Per aggiornare un'installazione da Git, eseguire `codex plugin marketplace upgrade crihexe-codex-alarm`, poi rimuovere e reinstallare il plugin con i comandi sopra. Riaprire la chat nella TUI dopo l'aggiornamento: una sessione già caricata può conservare la precedente connessione MCP. Se Codex segnala che gli hook sono cambiati, rivederli con `/hooks`.
+
 ## Uso nella chat
 
 La skill `codex-alarm` insegna all'agente a usare i tool MCP `arm`, `list`, `cancel` e `status`. Per esempio, dopo aver avviato una build persistente, l'agente può registrare un checker che osserva un file di stato e una scadenza di backup. `mode: continue` permette di proseguire altro lavoro; `mode: sleep` conclude il turno e mette in pausa un goal attivo. Al risveglio il servizio riattiva quel goal solo se non è stato modificato nel frattempo.
