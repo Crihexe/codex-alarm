@@ -90,4 +90,4 @@ Reopen the chat after updating so it uses the new MCP connection. Review changed
 
 ## Development
 
-From a local checkout, run `codex plugin marketplace add .` and then install the plugin as above. Run the tests with `python3 -m unittest discover -s tests -v`. The [technical analysis](RESEARCH.md) records the protocol choices and limitations; it is currently in Italian.
+From a local checkout, run `codex plugin marketplace add .` and then install the plugin as above. Run the tests with `python3 -m unittest discover -s tests -v`. The [technical analysis](RESEARCH.md) records the protocol choices and limitations.
