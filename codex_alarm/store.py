@@ -284,7 +284,7 @@ class Store:
                             (now, thread_id))
             self.db.execute("UPDATE events SET state='failed', reason='CHAT_SUSPENDED', updated_at=? WHERE thread_id=? AND origin='external' AND policy!='defer_until_available' AND state IN ('queued','deferred')",
                             (now, thread_id))
-        in_flight = self.db.execute("SELECT COUNT(*) FROM events WHERE thread_id=? AND origin='alarm' AND state='submitted' AND turn_state='in_progress'", (thread_id,)).fetchone()[0]
+        in_flight = self.db.execute("SELECT COUNT(*) FROM events WHERE thread_id=? AND state='submitted' AND turn_state='in_progress'", (thread_id,)).fetchone()[0]
         return {"thread_id": thread_id, "alarms_cancelled": cancelled, "in_flight": in_flight,
                 "safe_to_exit": in_flight == 0}
 

@@ -1,11 +1,11 @@
 {
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "codex-alarm",
   "version": "0.1.0",
   "description": "Persistent alarms and external events for Codex threads",
+  "mcpServers": "./mcp.json",
+  "hooks": "./hooks/hooks.json",
   "extensions": {
     "com.openai": {
-      "hooks": "./hooks/hooks.json",
       "interface": {
         "displayName": "Codex Alarm",
         "shortDescription": "Wake Codex when a condition or external event is ready",

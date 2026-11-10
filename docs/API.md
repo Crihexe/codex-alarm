@@ -1,6 +1,6 @@
-# Contratto proposto per gli eventi esterni
+# API degli eventi esterni
 
-Stato: specifica di progetto da verificare con una TUI Codex reale prima di considerarla stabile. Versione prevista: `v1`. Il servizio è incluso nel plugin e offre HTTP su un socket Unix locale, accessibile solo all'utente. Un sistema remoto può usare SSH o un gateway autenticato senza cambiare il contratto degli eventi.
+Versione `v1`. Il servizio è incluso nel plugin e offre HTTP su un socket Unix locale, accessibile solo all'utente. Un sistema remoto può usare SSH o un gateway autenticato senza cambiare il contratto degli eventi.
 
 ## Semantica di disponibilità
 
@@ -55,8 +55,6 @@ Un evento registrato risponde `202 Accepted` con una ricevuta, anche se `wait` h
 ```
 
 `GET /v1/events/{event_id}` restituisce la ricevuta aggiornata. `delivery.state` è `queued`, `deferred`, `submitted`, `failed` o `expired`; `submitted` significa che App Server ha accettato il `toolOutput`. `turn.state` è `none`, `in_progress`, `completed`, `interrupted` o `failed`, con l'ID del turno quando disponibile. Questi stati sono automatici e descrivono **se la sveglia ha raggiunto Codex e se il turno è partito o terminato**. Se l'output viene aggiunto a un turno già attivo, `in_progress` non prova che il modello abbia già letto quel preciso evento. La notifica `turn/completed` indica la fine del turno, non il successo di un'attività richiesta dall'evento.
-
-Un eventuale risultato semantico del lavoro dell'agente richiederebbe in futuro un resoconto esplicito associato all'`event_id`; non è necessario per la sveglia e non fa parte del contratto minimo. La prima versione non chiede al modello una chiamata di conferma per ogni evento.
 
 ## Errori
 

@@ -4,8 +4,8 @@
     "codex_alarm": {
       "type": "stdio",
       "command": "python3",
-      "args": ["${PLUGIN_ROOT}/scripts/mcp_server.py"],
-      "cwd": "${PLUGIN_ROOT}"
+      "args": ["scripts/mcp_server.py"],
+      "cwd": "."
     }
   }
 }
