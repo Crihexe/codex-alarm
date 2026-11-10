@@ -1,14 +1,14 @@
-# API degli eventi esterni
+# External Event API
 
-Versione `v1`. Il servizio è incluso nel plugin e offre HTTP su un socket Unix locale, accessibile solo all'utente. Un sistema remoto può usare SSH o un gateway autenticato senza cambiare il contratto degli eventi.
+The `v1` API is part of the codex-alarm plugin. It serves HTTP over a local Unix socket that only the current user can access. A remote integration can call it through SSH or an authenticated gateway without changing the event format.
 
-## Semantica di disponibilità
+## Availability and delivery
 
-La modalità predefinita è interattiva: il controller non chiama `thread/resume` quando il thread è scaricato. La verifica pubblica disponibile è lo stato `loaded`/`notLoaded` del thread App Server, **non** la presenza certa di una finestra TUI. `thread_unload_delay_secs = 0` fa scaricare presto un thread inattivo senza sottoscrittori, ma un thread attivo resta caricato anche dopo la chiusura della TUI. La corsa fra verifica e consegna è quindi una limitazione esplicita. La ripresa autonoma senza TUI è disabilitata per impostazione predefinita e configurabile per destinatario.
+Interactive delivery is the default. The dispatcher checks whether the Codex thread is loaded and does not call `thread/resume` for an unloaded thread unless headless delivery has been explicitly enabled. A loaded thread is not proof that its TUI window is still open: an active thread can remain loaded after the TUI exits. This leaves a small race between the availability check and event submission. The plugin sets `thread_unload_delay_secs = 0` to shorten that window for idle threads.
 
-L'utente può eseguire `!codex-alarm stop-chat` nella TUI prima di uscire. Il comando cancella le sveglie della chat corrente e ne sospende la consegna fino alla riapertura; non tocca altre chat. La risposta include il numero di allarmi cancellati, `in_flight` e `safe_to_exit`. L'utente attende `safe_to_exit: true` prima di uscire; se un turno già avviato da una sveglia o da un evento esterno è in corso, riceve `false` e il conteggio `in_flight`. Durante la sospensione, `require_available` e `allow_headless` rispondono `409 AGENT_UNAVAILABLE` con `reason = CHAT_SUSPENDED`, mentre `defer_until_available` conserva l'evento. La sospensione esplicita dell'utente prevale sull'opzione autonoma. Un evento già consegnato prima del comando non può essere ritirato retroattivamente.
+Before closing a chat, the user can run `!codex-alarm stop-chat` in the TUI. This cancels that chat's alarms and suspends delivery until the chat is reopened. It does not affect other chats. The response includes `alarms_cancelled`, `in_flight`, and `safe_to_exit`. Wait for `safe_to_exit: true` before exiting; `false` means a turn started by an alarm or external event is still in progress. Events already submitted cannot be withdrawn. While the chat is suspended, `require_available` and `allow_headless` requests receive `409 AGENT_UNAVAILABLE` with reason `CHAT_SUSPENDED`; `defer_until_available` events remain queued for later delivery.
 
-## Pubblicare un evento
+## Publish an event
 
 ```http
 POST /v1/events
@@ -20,30 +20,30 @@ Content-Type: application/json
   "event_id": "bounty:scan-42:finished",
   "recipient": {"thread_id": "01a12386-3da3-77d2-a458-f5f6e1e2c248"},
   "kind": "scan.finished",
-  "payload": {"message": "La scansione è terminata", "report_id": "scan-42"},
+  "payload": {"message": "The scan finished", "report_id": "scan-42"},
   "delivery_policy": "defer_until_available",
   "expires_at": "2027-11-11T12:00:00Z",
   "wait": {"for": "delivery_submitted", "timeout_ms": 30000}
 }
 ```
 
-`event_id` è scelto dal produttore ed è stabile per un singolo evento. `recipient` contiene esattamente `thread_id` oppure un `alias` registrato, risolto a una sola chat; gli eventi di una chat non vengono consegnati ad altre. `kind` identifica il tipo di evento. `payload` è dato esterno: entra nella chat come output del tool `codex_alarm.event`, mai come istruzione developer. `expires_at` è facoltativo e impedisce la consegna di eventi diventati obsoleti.
+Choose a stable `event_id` for each event. `recipient` must contain exactly one registered `thread_id` or `alias`; it resolves to one chat. `kind` identifies the event type, and `payload` is a JSON object delivered as `codex_alarm.event` tool output. `expires_at` is optional and prevents delivery after the event becomes stale. It accepts an RFC 3339 timestamp or Unix seconds.
 
-`delivery_policy` può essere:
+`delivery_policy` controls what happens when the recipient is unavailable:
 
-| Valore | Quando il thread non è caricato | Se diventa non disponibile prima della consegna |
+| Policy | If the thread is not loaded | If it becomes unavailable before submission |
 | --- | --- | --- |
-| `require_available` (predefinito per chiamate esterne) | Risposta `409 AGENT_UNAVAILABLE`; l'evento non è registrato. | L'evento già accettato passa a `delivery.state = failed`, con motivo `THREAD_NOT_LOADED`; non viene ritentato automaticamente. |
-| `defer_until_available` | Risposta `202` con `delivery.state = deferred`; l'evento resta pronto finché la chat torna disponibile o scade. | Resta `deferred`; il dispatcher riprova alla riapertura. |
-| `allow_headless` | Il servizio può chiamare `thread/resume` e avviare il modello senza TUI. | Continua in modalità autonoma. È ammesso solo se il destinatario ha abilitato questa modalità; altrimenti `403 HEADLESS_DISABLED`. |
+| `require_available` (default for external calls) | Return `409 AGENT_UNAVAILABLE`; do not register the event. | Mark an accepted event `failed` with reason `THREAD_NOT_LOADED`; do not retry automatically. |
+| `defer_until_available` | Return `202` with `delivery.state = deferred`. Keep the event until the chat is available or the event expires. | Keep it `deferred` and retry later. |
+| `allow_headless` | Call `thread/resume` and submit the event without a TUI. | Continue in headless mode. This requires per-recipient opt-in; otherwise return `403 HEADLESS_DISABLED`. |
 
-Gli allarmi registrati dal modello usano internamente `defer_until_available`. Una chiamata esterna può scegliere la stessa politica nel corpo della richiesta. Tutti gli eventi accettati, qualunque sia l'origine, entrano nella stessa coda persistente e nello stesso dispatcher di `toolOutput`; cambiano politica di disponibilità e metadati di origine.
+Alarms created by the agent use `defer_until_available` internally. External integrations can choose the same policy. Accepted events from both sources enter the same persistent queue and use the same `toolOutput` dispatcher.
 
-`wait` è facoltativo. Con `timeout_ms = 0` il servizio risponde subito. Può attendere al massimo 30 secondi per `delivery_submitted` o `turn_terminal`; allo scadere restituisce comunque la ricevuta corrente. Un timeout di `wait` non annulla né fallisce l'evento. Il client può consultare lo stato in seguito.
+`wait` is optional. Set `for` to `delivery_submitted` or `turn_terminal`, with `timeout_ms` from 0 to 30000. With zero or no `wait`, the API returns immediately. When a wait times out, the API returns the latest receipt; it does not cancel the event. You can query the receipt again later.
 
-## Risposta e stati
+## Receipt and status
 
-Un evento registrato risponde `202 Accepted` con una ricevuta, anche se `wait` ha osservato la consegna:
+An accepted event returns `202 Accepted` with a receipt, including when `wait` observed its submission:
 
 ```json
 {
@@ -54,31 +54,31 @@ Un evento registrato risponde `202 Accepted` con una ricevuta, anche se `wait` h
 }
 ```
 
-`GET /v1/events/{event_id}` restituisce la ricevuta aggiornata. `delivery.state` è `queued`, `deferred`, `submitted`, `failed` o `expired`; `submitted` significa che App Server ha accettato il `toolOutput`. `turn.state` è `none`, `in_progress`, `completed`, `interrupted` o `failed`, con l'ID del turno quando disponibile. Questi stati sono automatici e descrivono **se la sveglia ha raggiunto Codex e se il turno è partito o terminato**. Se l'output viene aggiunto a un turno già attivo, `in_progress` non prova che il modello abbia già letto quel preciso evento. La notifica `turn/completed` indica la fine del turno, non il successo di un'attività richiesta dall'evento.
+`GET /v1/events/{event_id}` returns the current receipt. `delivery.state` is `queued`, `deferred`, `submitted`, `failed`, or `expired`. `submitted` means Codex App Server accepted the tool output. `turn.state` is `none`, `in_progress`, `completed`, `interrupted`, or `failed`, with a turn ID when available. These states report delivery and Codex turn progress. If an event is added to a turn already in progress, `in_progress` does not prove that the model has read that particular event. `completed` means the turn ended; it does not report whether the agent completed any work related to the event.
 
-## Errori
+## Errors and retries
 
-Formato comune:
+Errors use this shape:
 
 ```json
 {"error":{"code":"AGENT_UNAVAILABLE","reason":"THREAD_NOT_LOADED","retryable":true}}
 ```
 
-| HTTP | `code` | Significato |
+| HTTP | Code | Meaning |
 | --- | --- | --- |
-| `400` | `BAD_REQUEST` | Campi non validi o politica sconosciuta. |
-| `403` | `HEADLESS_DISABLED` | Il destinatario non consente `allow_headless`. |
-| `404` | `RECIPIENT_NOT_FOUND` | Thread o alias sconosciuto. |
-| `409` | `AGENT_UNAVAILABLE` | `require_available` e thread non caricato (`THREAD_NOT_LOADED`) o sospeso dall'utente (`CHAT_SUSPENDED`). |
-| `409` | `EVENT_ID_CONFLICT` | `event_id` già usato con contenuto diverso. |
+| `400` | `BAD_REQUEST` | Invalid fields or unknown delivery policy. |
+| `403` | `HEADLESS_DISABLED` | The recipient has not enabled `allow_headless`. |
+| `404` | `RECIPIENT_NOT_FOUND` | Unknown thread or alias. |
+| `409` | `AGENT_UNAVAILABLE` | A `require_available` recipient is unloaded (`THREAD_NOT_LOADED`), interrupted (`USER_INTERRUPTED`), or manually suspended (`CHAT_SUSPENDED`). A suspended recipient also rejects `allow_headless`. |
+| `409` | `EVENT_ID_CONFLICT` | The same `event_id` was used with different content. |
 
-Inviare di nuovo lo stesso `event_id` con contenuto identico restituisce la ricevuta esistente, senza creare una seconda sveglia. Un errore prima dell'ammissione non riserva l'ID; si può ritentare lo stesso evento quando l'agente torna disponibile. Se un evento `require_available` è stato accettato con `202` e poi fallisce per la corsa di chiusura, il client deve consultare lo stato e pubblicare un nuovo tentativo con un nuovo `event_id` se vuole ritentare. Nessuna risposta sincrona può garantire che la TUI resti aperta dopo l'ammissione.
+Sending the same `event_id` with identical content returns its existing receipt while its `expires_at` value is still in the future. An error before admission does not reserve the ID, so the sender can retry when the chat becomes available. If a `require_available` event was accepted and later failed during the closing race, inspect its receipt and use a new `event_id` for another delivery attempt. A synchronous response cannot guarantee that the TUI stays open afterward.
 
-Se il processo API non è in esecuzione, il client riceve un errore di connessione al socket, non una risposta JSON `AGENT_UNAVAILABLE`. Il comando `codex-alarm health` lo avvia se necessario e ne verifica la disponibilità.
+If the API process is not running, the client gets a socket connection error rather than a JSON `AGENT_UNAVAILABLE` response. `codex-alarm health` starts the service if needed and checks that it is ready.
 
-## Socket ed endpoint di gestione
+## Socket and management endpoints
 
-L'API ascolta su `$XDG_RUNTIME_DIR/codex-alarm/api.sock`. Se la variabile manca, usa `/run/user/<uid>/codex-alarm/api.sock` quando disponibile e di proprietà dell'utente; altrimenti usa `~/.local/state/codex-alarm/run/api.sock`. Il socket è accessibile solo all'utente (`0600`); non espone una porta TCP. Per inviare un evento senza usare il client incluso:
+The API listens at `$XDG_RUNTIME_DIR/codex-alarm/api.sock`. If `XDG_RUNTIME_DIR` is missing, it uses `/run/user/<uid>/codex-alarm/api.sock` when that directory exists and belongs to the user. Otherwise it uses `~/.local/state/codex-alarm/run/api.sock`. The socket has mode `0600`; no TCP port is opened. When `XDG_RUNTIME_DIR` is set, you can call the API directly:
 
 ```sh
 curl --unix-socket "$XDG_RUNTIME_DIR/codex-alarm/api.sock" \
@@ -86,14 +86,14 @@ curl --unix-socket "$XDG_RUNTIME_DIR/codex-alarm/api.sock" \
   http://localhost/v1/events
 ```
 
-| Metodo e percorso | Scopo |
+| Method and path | Purpose |
 | --- | --- |
-| `GET /health` | Versione, PID e stato di supervisione del servizio. |
-| `POST /v1/threads/alias` | Registra `{"thread_id":"...","alias":"..."}`; un alias appartiene a un solo thread. |
-| `POST /v1/threads/headless` | Imposta `{"thread_id":"...","enabled":true|false}` per l'opt-in alla ripresa autonoma. |
-| `POST /v1/threads/stop` | Sospende una chat, cancella le sveglie interne non consegnate e restituisce `safe_to_exit`. |
-| `POST /v1/threads/resume` | Rimuove la sospensione manuale senza ricreare gli allarmi cancellati. |
-| `GET /v1/threads/{thread_id}/alarms` | Elenca gli allarmi ancora attivi e la revisione. |
-| `GET /v1/events/{event_id}` | Ricevuta corrente di un evento. |
+| `GET /health` | Read service version, PID, and supervisor status. |
+| `POST /v1/threads/alias` | Register `{"thread_id":"...","alias":"..."}`. An alias belongs to one thread. |
+| `POST /v1/threads/headless` | Set `{"thread_id":"...","enabled":true}` or `false` for headless delivery. |
+| `POST /v1/threads/stop` | Suspend a chat, cancel its undelivered alarms, and return `safe_to_exit`. |
+| `POST /v1/threads/resume` | Lift manual suspension without recreating canceled alarms. |
+| `GET /v1/threads/{thread_id}/alarms` | List active alarms and their revision. |
+| `GET /v1/events/{event_id}` | Read an event receipt. |
 
-Gli endpoint `register`, `interrupt` e `user-prompt` sono usati dagli hook del plugin. Gli endpoint MCP degli allarmi richiedono un contesto HMAC generato da `PreToolUse`; un client esterno deve usare `POST /v1/events`.
+The plugin hooks use the internal `register`, `interrupt`, and `user-prompt` endpoints. Alarm MCP endpoints require HMAC context supplied by the `PreToolUse` hook. External clients should publish through `POST /v1/events`.
