@@ -78,7 +78,7 @@ Se il processo API non è in esecuzione, il client riceve un errore di connessio
 
 ## Socket ed endpoint di gestione
 
-L'API ascolta su `$XDG_RUNTIME_DIR/codex-alarm/api.sock`, oppure `~/.local/state/codex-alarm/run/api.sock` se `XDG_RUNTIME_DIR` manca. Il socket è accessibile solo all'utente (`0600`); non espone una porta TCP. Per inviare un evento senza usare il client incluso:
+L'API ascolta su `$XDG_RUNTIME_DIR/codex-alarm/api.sock`. Se la variabile manca, usa `/run/user/<uid>/codex-alarm/api.sock` quando disponibile e di proprietà dell'utente; altrimenti usa `~/.local/state/codex-alarm/run/api.sock`. Il socket è accessibile solo all'utente (`0600`); non espone una porta TCP. Per inviare un evento senza usare il client incluso:
 
 ```sh
 curl --unix-socket "$XDG_RUNTIME_DIR/codex-alarm/api.sock" \

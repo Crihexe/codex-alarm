@@ -48,7 +48,7 @@ Senza `stop-chat`, la modalità interattiva non ricarica thread scaricati: l'eve
 
 ## Eventi da altri programmi
 
-L'API HTTP usa il socket Unix `$XDG_RUNTIME_DIR/codex-alarm/api.sock`, oppure `~/.local/state/codex-alarm/run/api.sock` se `XDG_RUNTIME_DIR` manca. Il socket ha permessi `0600`. Un programma sul server remoto può inviare l'evento tramite SSH alla macchina su cui gira Codex; non serve esporre il socket sulla rete.
+L'API HTTP usa il socket Unix `$XDG_RUNTIME_DIR/codex-alarm/api.sock`. Se Codex non passa `XDG_RUNTIME_DIR` al processo MCP, il plugin usa `/run/user/<uid>/codex-alarm/api.sock` quando quella directory appartiene all'utente; solo se non è disponibile ripiega su `~/.local/state/codex-alarm/run/api.sock`. Il socket ha permessi `0600`. Un programma sul server remoto può inviare l'evento tramite SSH alla macchina su cui gira Codex; non serve esporre il socket sulla rete.
 
 ```sh
 codex-alarm alias my-research-agent --thread THREAD_ID

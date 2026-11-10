@@ -13,7 +13,15 @@ from pathlib import Path
 
 from .auth import ensure_key
 from .client import request
-from .paths import state_dir
+from .paths import state_dir, user_runtime_base
+
+
+def systemd_env() -> dict[str, str]:
+    env = os.environ.copy()
+    runtime = user_runtime_base()
+    if runtime and not env.get("XDG_RUNTIME_DIR"):
+        env["XDG_RUNTIME_DIR"] = str(runtime)
+    return env
 
 
 def plugin_root() -> Path:
@@ -44,11 +52,12 @@ def user_service_unit(binary: Path) -> str:
             raise ValueError("systemd path contains newline")
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
+    env = systemd_env()
     environment = "".join(
-        f"Environment={quoted(key + '=' + os.environ[key])}\n"
+        f"Environment={quoted(key + '=' + env[key])}\n"
         for key in ("CODEX_HOME", "CODEX_ALARM_STATE_DIR", "CODEX_ALARM_RUNTIME_DIR",
                     "XDG_RUNTIME_DIR", "XDG_STATE_HOME")
-        if key in os.environ
+        if key in env
     )
     return ("[Unit]\nDescription=Codex Alarm scheduler\nStartLimitIntervalSec=0\n\n"
             "[Service]\nType=simple\n"
@@ -60,7 +69,7 @@ def user_service_unit(binary: Path) -> str:
 def ensure_user_service(binary: Path, cli_changed: bool = False) -> bool:
     if os.environ.get("CODEX_ALARM_NO_SYSTEMD") == "1" or not shutil.which("systemctl"):
         return False
-    probe = subprocess.run(["systemctl", "--user", "is-system-running"],
+    probe = subprocess.run(["systemctl", "--user", "is-system-running"], env=systemd_env(),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if probe.returncode not in (0, 1):  # degraded is usable; offline is not.
         return False
@@ -71,12 +80,12 @@ def ensure_user_service(binary: Path, cli_changed: bool = False) -> bool:
     changed = not unit.exists() or unit.read_text() != content
     if changed:
         unit.write_text(content)
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True,
+        subprocess.run(["systemctl", "--user", "daemon-reload"], env=systemd_env(), check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    subprocess.run(["systemctl", "--user", "enable", "codex-alarm.service"], check=True,
+    subprocess.run(["systemctl", "--user", "enable", "codex-alarm.service"], env=systemd_env(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     action = "restart" if changed or cli_changed else "start"
-    subprocess.run(["systemctl", "--user", action, "codex-alarm.service"], check=True,
+    subprocess.run(["systemctl", "--user", action, "codex-alarm.service"], env=systemd_env(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     return True
 
@@ -127,7 +136,7 @@ def ensure_service() -> None:
             return
         unit = Path.home() / ".config" / "systemd" / "user" / "codex-alarm.service"
         if unit.exists() and os.environ.get("CODEX_ALARM_NO_SYSTEMD") != "1" and shutil.which("systemctl"):
-            subprocess.run(["systemctl", "--user", "start", "codex-alarm.service"], check=True,
+            subprocess.run(["systemctl", "--user", "start", "codex-alarm.service"], env=systemd_env(), check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             for _ in range(50):
                 if health():
@@ -160,10 +169,10 @@ def uninstall() -> dict:
     binary = Path.home() / ".local" / "bin" / "codex-alarm"
     unit = Path.home() / ".config" / "systemd" / "user" / "codex-alarm.service"
     if unit.exists() and str(binary) in unit.read_text() and "Description=Codex Alarm scheduler" in unit.read_text():
-        subprocess.run(["systemctl", "--user", "disable", "--now", "codex-alarm.service"],
+        subprocess.run(["systemctl", "--user", "disable", "--now", "codex-alarm.service"], env=systemd_env(),
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         unit.unlink()
-        subprocess.run(["systemctl", "--user", "daemon-reload"],
+        subprocess.run(["systemctl", "--user", "daemon-reload"], env=systemd_env(),
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     elif health():
         try:

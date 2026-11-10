@@ -1,6 +1,6 @@
 {
   "name": "codex-alarm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Persistent alarms and external events for Codex threads",
   "mcpServers": "./mcp.json",
   "hooks": "./hooks/hooks.json",

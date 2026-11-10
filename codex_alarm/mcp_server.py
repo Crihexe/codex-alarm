@@ -79,7 +79,7 @@ def handle(message: dict) -> dict | None:
         if method == "initialize":
             result = {"protocolVersion": message.get("params", {}).get("protocolVersion", "2024-11-05"),
                       "capabilities": {"tools": {"listChanged": False}},
-                      "serverInfo": {"name": "codex-alarm", "version": "0.1.0"}}
+                      "serverInfo": {"name": "codex-alarm", "version": "0.1.1"}}
         elif method == "ping":
             result = {}
         elif method == "tools/list":
@@ -94,6 +94,9 @@ def handle(message: dict) -> dict | None:
     except (ValueError, OSError, RuntimeError) as exc:
         return {"jsonrpc": "2.0", "id": request_id,
                 "error": {"code": -32603, "message": str(exc)}}
+    except Exception as exc:
+        return {"jsonrpc": "2.0", "id": request_id,
+                "error": {"code": -32603, "message": f"codex-alarm operation failed: {type(exc).__name__}"}}
 
 
 def main() -> int:
