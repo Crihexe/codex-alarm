@@ -110,6 +110,13 @@ class AlarmService:
 
     async def run_checker(self, alarm: dict) -> None:
         alarm_id = alarm["alarm_id"]
+        try:
+            state, detail = await self.execute_checker(alarm)
+            self.store.check_result(alarm_id, state, detail)
+        finally:
+            self.running_checkers.discard(alarm_id)
+
+    async def execute_checker(self, alarm: dict) -> tuple[str, str]:
         command = (["python3", "-c", alarm["source"]] if alarm["language"] == "python"
                    else ["bash", "-c", alarm["source"]])
         state, detail = "error", "checker did not run"
@@ -154,9 +161,7 @@ class AlarmService:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             detail = f"checker launch failed: {type(exc).__name__}"
-        finally:
-            self.running_checkers.discard(alarm_id)
-        self.store.check_result(alarm_id, state, detail)
+        return state, detail
 
     async def dispatch_guarded(self, event: dict) -> None:
         try:
@@ -450,10 +455,26 @@ class AlarmService:
                 raise AlarmError("MISSING_THREAD_CONTEXT", str(exc), 403) from exc
             if "deadline_at" in data:
                 data["deadline_at"] = timestamp(data["deadline_at"])
-            result = self.store.arm(thread_id, data)
-            if data.get("mode") == "sleep" and not result["idempotent"]:
-                result["goal_paused"] = await self.pause_goal_for_alarm(thread_id, result["alarm_id"])
-            return 200, result
+            prepared = self.store.prepare_arm(thread_id, data)
+            if prepared["existing"]:
+                return 200, prepared["existing"]
+            state, detail = await self.execute_checker(prepared)
+            if state == "error":
+                raise AlarmError("CHECKER_ERROR", detail or "checker returned error")
+            if state == "done":
+                return 200, {"state": "condition_met", "detail": detail,
+                             "alarm_id": None, "goal_paused": False}
+            async with self.lock(thread_id):
+                if self.store.thread(thread_id)["suspended"]:
+                    raise AlarmError("CHAT_SUSPENDED", "chat was stopped while checking", 409)
+                result = self.store.arm(thread_id, data)
+                if result["idempotent"]:
+                    return 200, result
+                self.store.check_result(result["alarm_id"], "pending", detail)
+                result["initial_check"] = {"state": "pending", "detail": detail}
+                if prepared["mode"] == "sleep":
+                    result["goal_paused"] = await self.pause_goal_for_alarm(thread_id, result["alarm_id"])
+                return 200, result
         if method == "POST" and path == "/v1/alarms/list":
             try:
                 thread_id = verified_context(data, "list")

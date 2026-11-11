@@ -1,5 +1,6 @@
 """Persistence and chat isolation regressions."""
 
+import json
 import tempfile
 import time
 import unittest
@@ -74,6 +75,24 @@ class StoreTests(unittest.TestCase):
         self.store.deadline_alarm(alarm["alarm_id"])
         self.assertEqual(self.store.receipt("alarm:" + alarm["alarm_id"])["delivery"]["state"], "queued")
         self.assertEqual(self.store.alarm(alarm["alarm_id"])["state"], "ready")
+
+    def test_three_consecutive_checker_errors_wake_with_diagnostic(self):
+        alarm = self.store.arm("chat-a", self.alarm_args())
+        alarm_id = alarm["alarm_id"]
+        self.store.check_result(alarm_id, "error", "temporary failure")
+        self.store.check_result(alarm_id, "pending", "job is still running")
+        self.assertEqual(self.store.alarm(alarm_id)["consecutive_errors"], 0)
+        self.assertIsNone(self.store.alarm(alarm_id)["last_error"])
+        self.store.check_result(alarm_id, "error", "first failure")
+        self.store.check_result(alarm_id, "error", "second failure")
+        self.assertEqual(self.store.alarm(alarm_id)["state"], "armed")
+        self.store.check_result(alarm_id, "error", "third failure")
+        self.assertEqual(self.store.alarm(alarm_id)["state"], "ready")
+        self.assertEqual(self.store.alarm(alarm_id)["last_error"], "third failure")
+        row = self.store.event("alarm:" + alarm_id)
+        payload = json.loads(row["payload"])
+        self.assertEqual(payload["reason"], "checker_error")
+        self.assertEqual(payload["detail"], "third failure")
 
 
 if __name__ == "__main__":

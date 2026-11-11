@@ -72,6 +72,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 "kind": "build.finished", "payload": {"message": "ready"},
                 "delivery_policy": policy}
 
+    async def arm(self, source, mode="sleep", invocation="call-preflight"):
+        with patch.dict(os.environ, {"CODEX_ALARM_STATE_DIR": self.temp.name}):
+            call = {"session_id": "chat-a", "tool_use_id": invocation,
+                    "tool_name": "mcp__codex_alarm__arm", "tool_input": {
+                        "language": "python", "source": source, "cwd": self.temp.name,
+                        "interval_seconds": 10, "deadline_at": time.time() + 60,
+                        "wake_message": "Inspect result", "mode": mode}}
+            signed = pre_tool_use(call)["hookSpecificOutput"]["updatedInput"]
+            return await self.service.route("POST", "/v1/alarms", signed)
+
     async def test_unavailable_reject_or_defer_and_deliver_after_reopen(self):
         with self.assertRaises(AlarmError) as context:
             await self.service.route("POST", "/v1/events", self.event("require_available"))
@@ -124,7 +134,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"CODEX_ALARM_STATE_DIR": self.temp.name}):
             call = {"session_id": "chat-a", "tool_use_id": "call-7",
                     "tool_name": "mcp__codex_alarm__arm", "tool_input": {
-                        "language": "python", "source": "print('{}')", "cwd": self.temp.name,
+                        "language": "python", "source": "print('{\"state\":\"pending\"}')", "cwd": self.temp.name,
                         "interval_seconds": 10, "deadline_at": time.time() + 60,
                         "wake_message": "Check result"}}
             signed = pre_tool_use(call)["hookSpecificOutput"]["updatedInput"]
@@ -135,6 +145,58 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(context.exception.code, "MISSING_THREAD_CONTEXT")
             call["agent_id"] = "subagent-1"
             self.assertEqual(pre_tool_use(call)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    async def test_failed_initial_check_does_not_arm_or_pause_goal(self):
+        FakeAppServer.goal_data = {"status": "active", "objective": "Wait for result", "updatedAt": 1}
+        with self.assertRaises(AlarmError) as context:
+            await self.arm("import sys; sys.stderr.write('invalid checker syntax'); sys.exit(2)")
+        self.assertEqual(context.exception.code, "CHECKER_ERROR")
+        self.assertIn("invalid checker syntax", context.exception.reason)
+        self.assertEqual(self.store.list_alarms("chat-a")["alarms"], [])
+        self.assertEqual(FakeAppServer.goal_data["status"], "active")
+
+    async def test_pending_initial_check_arms_once_and_pauses_goal(self):
+        FakeAppServer.goal_data = {"status": "active", "objective": "Wait for result", "updatedAt": 1}
+        source = ("from pathlib import Path; import json; p=Path('count'); "
+                  "p.write_text(str(int(p.read_text())+1 if p.exists() else 1)); "
+                  "print(json.dumps({'state':'pending','detail':'still running'}))")
+        _, result = await self.arm(source)
+        self.assertEqual(result["state"], "armed")
+        self.assertEqual(result["initial_check"], {"state": "pending", "detail": "still running"})
+        self.assertTrue(result["goal_paused"])
+        self.assertEqual((Path(self.temp.name) / "count").read_text(), "1")
+        self.assertGreater(self.store.alarm(result["alarm_id"])["next_check_at"], time.time())
+        _, repeated = await self.arm(source)
+        self.assertTrue(repeated["idempotent"])
+        self.assertEqual((Path(self.temp.name) / "count").read_text(), "1")
+
+    async def test_initial_done_returns_without_alarm_or_goal_pause(self):
+        FakeAppServer.goal_data = {"status": "active", "objective": "Wait for result", "updatedAt": 1}
+        _, result = await self.arm("import json; print(json.dumps({'state':'done','detail':'result exists'}))")
+        self.assertEqual(result["state"], "condition_met")
+        self.assertEqual(result["detail"], "result exists")
+        self.assertIsNone(result["alarm_id"])
+        self.assertEqual(self.store.list_alarms("chat-a")["alarms"], [])
+        self.assertEqual(FakeAppServer.goal_data["status"], "active")
+
+    async def test_stop_during_initial_check_prevents_late_arm(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_check(_):
+            started.set()
+            await release.wait()
+            return "pending", "still running"
+
+        with patch.object(self.service, "execute_checker", side_effect=slow_check):
+            arming = asyncio.create_task(self.arm("print('{\"state\":\"pending\"}')"))
+            await started.wait()
+            _, stopped = await self.service.route("POST", "/v1/threads/stop", {"thread_id": "chat-a"})
+            self.assertTrue(stopped["safe_to_exit"])
+            release.set()
+            with self.assertRaises(AlarmError) as context:
+                await arming
+        self.assertEqual(context.exception.code, "CHAT_SUSPENDED")
+        self.assertEqual(self.store.list_alarms("chat-a")["alarms"], [])
 
 
 if __name__ == "__main__":

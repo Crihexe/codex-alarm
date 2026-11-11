@@ -24,6 +24,9 @@ def canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+CHECKER_ERROR_LIMIT = 3
+
+
 class Store:
     def __init__(self, path: Path):
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -62,6 +65,7 @@ class Store:
                 goal_objective TEXT,
                 last_detail TEXT,
                 last_error TEXT,
+                consecutive_errors INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS alarms_due ON alarms(state, next_check_at);
@@ -87,7 +91,8 @@ class Store:
         """)
         self.db.commit()
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(alarms)")}
-        for name, kind in (("goal_paused_at", "INTEGER"), ("goal_objective", "TEXT")):
+        for name, kind in (("goal_paused_at", "INTEGER"), ("goal_objective", "TEXT"),
+                           ("consecutive_errors", "INTEGER NOT NULL DEFAULT 0")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE alarms ADD COLUMN {name} {kind}")
         self.db.commit()
@@ -155,12 +160,13 @@ class Store:
     def list_alarms(self, thread_id: str) -> dict:
         thread = self.register_thread(thread_id)
         rows = self.db.execute("""SELECT alarm_id, language, cwd, interval_seconds, deadline_at,
-                                   wake_message, mode, state, next_check_at, last_detail, last_error
+                                   wake_message, mode, state, next_check_at, last_detail, last_error,
+                                   consecutive_errors
                                    FROM alarms WHERE thread_id=? AND state IN ('armed','ready')
                                    ORDER BY created_at""", (thread_id,)).fetchall()
         return {"revision": thread["revision"], "alarms": [dict(r) for r in rows]}
 
-    def arm(self, thread_id: str, args: dict) -> dict:
+    def prepare_arm(self, thread_id: str, args: dict) -> dict:
         self.register_thread(thread_id)
         language = args.get("language")
         source = args.get("source")
@@ -187,25 +193,36 @@ class Store:
             raise AlarmError("BAD_REQUEST", "interval 1..3600s, timeout < interval, deadline within 30 days")
         if invocation_id is not None and (not isinstance(invocation_id, str) or len(invocation_id) > 200):
             raise AlarmError("BAD_REQUEST", "invalid invocation id")
+        if invocation_id:
+            prior = self.db.execute("SELECT alarm_id FROM alarms WHERE invocation_id=?", (invocation_id,)).fetchone()
+            if prior:
+                row = self.db.execute("SELECT thread_id,state FROM alarms WHERE alarm_id=?", (prior["alarm_id"],)).fetchone()
+                if row["thread_id"] != thread_id:
+                    raise AlarmError("INVOCATION_CONFLICT", "invocation belongs to another thread", 409)
+                return {"existing": {"alarm_id": prior["alarm_id"], "state": row["state"], "idempotent": True,
+                                     **self.list_alarms(thread_id)}}
+        existing = self.list_alarms(thread_id)
+        if existing["alarms"] and not (args.get("allow_parallel") is True and
+                                       args.get("expected_revision") == existing["revision"]):
+            raise AlarmError("ACTIVE_ALARMS_EXIST", canonical(existing), 409)
+        return {"existing": None, "language": language, "source": source, "cwd": cwd,
+                "interval_seconds": interval, "timeout_seconds": timeout, "deadline_at": deadline,
+                "wake_message": message, "mode": mode, "invocation_id": invocation_id}
+
+    def arm(self, thread_id: str, args: dict) -> dict:
+        prepared = self.prepare_arm(thread_id, args)
+        if prepared["existing"]:
+            return prepared["existing"]
+        now = time.time()
         with self.db:
-            if invocation_id:
-                prior = self.db.execute("SELECT alarm_id FROM alarms WHERE invocation_id=?", (invocation_id,)).fetchone()
-                if prior:
-                    row = self.db.execute("SELECT thread_id,state FROM alarms WHERE alarm_id=?", (prior["alarm_id"],)).fetchone()
-                    if row["thread_id"] != thread_id:
-                        raise AlarmError("INVOCATION_CONFLICT", "invocation belongs to another thread", 409)
-                    return {"alarm_id": prior["alarm_id"], "state": row["state"], "idempotent": True,
-                            **self.list_alarms(thread_id)}
-            existing = self.list_alarms(thread_id)
-            if existing["alarms"] and not (args.get("allow_parallel") is True and
-                                             args.get("expected_revision") == existing["revision"]):
-                raise AlarmError("ACTIVE_ALARMS_EXIST", canonical(existing), 409)
             alarm_id = str(uuid.uuid4())
             self.db.execute("""INSERT INTO alarms(alarm_id,thread_id,invocation_id,language,source,cwd,
                 interval_seconds,timeout_seconds,deadline_at,next_check_at,wake_message,mode,state,created_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (alarm_id, thread_id, invocation_id, language, source, cwd, interval, timeout,
-                 deadline, now, message, mode, "armed", now))
+                (alarm_id, thread_id, prepared["invocation_id"], prepared["language"],
+                 prepared["source"], prepared["cwd"], prepared["interval_seconds"], prepared["timeout_seconds"],
+                 prepared["deadline_at"], now + prepared["interval_seconds"], prepared["wake_message"],
+                 prepared["mode"], "armed", now))
             self.db.execute("UPDATE threads SET revision=revision+1, updated_at=? WHERE thread_id=?", (now, thread_id))
         return {"alarm_id": alarm_id, "state": "armed", "idempotent": False,
                 "revision": self.thread(thread_id)["revision"]}
@@ -232,12 +249,16 @@ class Store:
         detail = detail[:2000]
         if state == "done":
             self._trigger_alarm(dict(row), "condition_met", detail)
+        elif state == "error" and row["consecutive_errors"] + 1 >= CHECKER_ERROR_LIMIT:
+            self._trigger_alarm(dict(row), "checker_error", detail)
         else:
             with self.db:
-                self.db.execute("""UPDATE alarms SET next_check_at=?, last_detail=?, last_error=?
+                self.db.execute("""UPDATE alarms SET next_check_at=?, last_detail=?, last_error=?,
+                                   consecutive_errors=?
                                    WHERE alarm_id=? AND state='armed'""",
                                 (now + row["interval_seconds"], detail if state == "pending" else row["last_detail"],
-                                 detail if state == "error" else row["last_error"], alarm_id))
+                                 detail if state == "error" else None,
+                                 row["consecutive_errors"] + 1 if state == "error" else 0, alarm_id))
 
     def deadline_alarm(self, alarm_id: str) -> None:
         row = self.db.execute("SELECT * FROM alarms WHERE alarm_id=?", (alarm_id,)).fetchone()
@@ -250,8 +271,11 @@ class Store:
         payload = {"alarm_id": row["alarm_id"], "reason": reason, "message": row["wake_message"],
                    "detail": detail[:2000], "mode": row["mode"]}
         with self.db:
-            self.db.execute("UPDATE alarms SET state='ready', last_detail=? WHERE alarm_id=? AND state='armed'",
-                            (detail[:2000], row["alarm_id"]))
+            self.db.execute("""UPDATE alarms SET state='ready', last_detail=?,
+                               last_error=CASE WHEN ?='checker_error' THEN ? ELSE last_error END,
+                               consecutive_errors=CASE WHEN ?='checker_error' THEN ? ELSE consecutive_errors END
+                               WHERE alarm_id=? AND state='armed'""",
+                            (detail[:2000], reason, detail[:2000], reason, CHECKER_ERROR_LIMIT, row["alarm_id"]))
             self.db.execute("""INSERT OR IGNORE INTO events(event_id,thread_id,alarm_id,kind,payload,policy,
                 origin,fingerprint,expires_at,state,next_attempt_at,created_at,updated_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
