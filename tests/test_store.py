@@ -1,6 +1,7 @@
 """Persistence and chat isolation regressions."""
 
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -93,6 +94,34 @@ class StoreTests(unittest.TestCase):
         payload = json.loads(row["payload"])
         self.assertEqual(payload["reason"], "checker_error")
         self.assertEqual(payload["detail"], "third failure")
+
+    def test_existing_database_gains_error_counter(self):
+        path = Path(self.temp.name) / "legacy.db"
+        db = sqlite3.connect(path)
+        db.execute("""CREATE TABLE alarms (
+            alarm_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, invocation_id TEXT UNIQUE,
+            language TEXT NOT NULL, source TEXT NOT NULL, cwd TEXT NOT NULL,
+            interval_seconds REAL NOT NULL, timeout_seconds REAL NOT NULL,
+            deadline_at REAL NOT NULL, next_check_at REAL NOT NULL,
+            wake_message TEXT NOT NULL, mode TEXT NOT NULL, state TEXT NOT NULL,
+            goal_paused_at INTEGER, goal_objective TEXT, last_detail TEXT,
+            last_error TEXT, created_at REAL NOT NULL
+        )""")
+        db.execute("""INSERT INTO alarms(alarm_id, thread_id, language, source, cwd,
+            interval_seconds, timeout_seconds, deadline_at, next_check_at,
+            wake_message, mode, state, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("old-alarm", "chat-a", "python", "print('{}')", self.temp.name,
+             10, 5, time.time() + 60, time.time() + 10, "Wait", "sleep", "armed", time.time()))
+        db.commit()
+        db.close()
+        upgraded = Store(path)
+        try:
+            upgraded.register_thread("chat-a")
+            self.assertEqual(upgraded.alarm("old-alarm")["consecutive_errors"], 0)
+            upgraded.check_result("old-alarm", "error", "network error")
+            self.assertEqual(upgraded.alarm("old-alarm")["consecutive_errors"], 1)
+        finally:
+            upgraded.close()
 
 
 if __name__ == "__main__":

@@ -76,6 +76,20 @@ Sending the same `event_id` with identical content returns its existing receipt 
 
 If the API process is not running, the client gets a socket connection error rather than a JSON `AGENT_UNAVAILABLE` response. `codex-alarm health` starts the service if needed and checks that it is ready.
 
+## Agent alarm checks
+
+The MCP `arm` tool runs its checker once before admitting an alarm. Its result determines the response:
+
+| Initial checker state | `arm` result | Goal |
+| --- | --- | --- |
+| `pending` | `200` with `state: "armed"`, an `alarm_id`, and `initial_check` containing the checker detail. | Paused only when `mode: "sleep"` and an active goal exists. |
+| `done` | `200` with `state: "condition_met"`, `detail`, and `alarm_id: null`. No alarm is registered. | Unchanged; the agent can act immediately. |
+| `error`, invalid output, nonzero exit, or timeout | `400 CHECKER_ERROR` with the diagnostic in `reason`. No alarm is registered. | Unchanged. |
+
+The checker runs with the requested `cwd` and is expected to be safe to run more than once. The initial check has a 30-second cap so the MCP call can return within the local client's 35-second timeout; later checks use the requested `timeout_seconds`. Once armed, three consecutive `error` results produce an `alarm.ready` event with `reason: "checker_error"` and the latest diagnostic in `detail`. A `pending` result resets the error count. The backup deadline still fires first if it arrives sooner. `done` produces `reason: "condition_met"` immediately. A terminal failure of the observed task should be reported as `done` when the alarm's condition is that the task has ended; `error` means the checker could not determine the condition.
+
+The MCP `arm` endpoint returns `400 CHECKER_ERROR` when its initial check fails and `409 CHAT_SUSPENDED` if the user stops the chat while that check is running. Neither response registers an alarm.
+
 ## Socket and management endpoints
 
 The API listens at `$XDG_RUNTIME_DIR/codex-alarm/api.sock`. If `XDG_RUNTIME_DIR` is missing, it uses `/run/user/<uid>/codex-alarm/api.sock` when that directory exists and belongs to the user. Otherwise it uses `~/.local/state/codex-alarm/run/api.sock`. The socket has mode `0600`; no TCP port is opened. When `XDG_RUNTIME_DIR` is set, you can call the API directly:

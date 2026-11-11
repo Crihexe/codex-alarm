@@ -359,7 +359,7 @@ class AlarmService:
 
     async def route(self, method: str, path: str, data: dict) -> tuple[int, dict]:
         if method == "GET" and path == "/health":
-            return 200, {"status": "ok", "version": "0.1.3", "pid": os.getpid(),
+            return 200, {"status": "ok", "version": "0.1.4", "pid": os.getpid(),
                          "managed_by_systemd": bool(os.environ.get("INVOCATION_ID"))}
         if method == "POST" and path == "/v1/service/stop":
             self.stop()
@@ -458,7 +458,8 @@ class AlarmService:
             prepared = self.store.prepare_arm(thread_id, data)
             if prepared["existing"]:
                 return 200, prepared["existing"]
-            state, detail = await self.execute_checker(prepared)
+            state, detail = await self.execute_checker({**prepared,
+                "timeout_seconds": min(prepared["timeout_seconds"], 30)})
             if state == "error":
                 raise AlarmError("CHECKER_ERROR", detail or "checker returned error")
             if state == "done":

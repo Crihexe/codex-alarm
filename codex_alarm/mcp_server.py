@@ -23,13 +23,13 @@ def schema(properties: dict, required: list[str] | None = None) -> dict:
 
 
 TOOLS = [
-    {"name": "arm", "description": "Register a durable condition checker with a mandatory backup deadline. Return immediately so you can continue or finish this turn. Checker stdout must be one JSON object with state pending, done, or error.",
+    {"name": "arm", "description": "Check once immediately, then register a durable alarm with a mandatory backup deadline if pending. Done returns condition_met without an alarm; error rejects with diagnostics. Checker stdout must be one JSON object with state pending, done, or error.",
      "inputSchema": schema({
          "language": {"type": "string", "enum": ["python", "bash"]},
          "source": {"type": "string", "description": "Python or Bash checker source; print JSON state."},
          "cwd": {"type": "string", "description": "Existing absolute working directory."},
          "interval_seconds": {"type": "number", "minimum": 1, "maximum": 3600},
-         "timeout_seconds": {"type": "number", "description": "Maximum runtime of one check; must be below interval."},
+         "timeout_seconds": {"type": "number", "description": "Maximum runtime of later checks; must be below interval. The initial check is capped at 30 seconds."},
          "deadline_at": {"type": "string", "description": "Mandatory RFC 3339 backup deadline with timezone."},
          "wake_message": {"type": "string", "description": "What you need to know when woken."},
          "mode": {"type": "string", "enum": ["continue", "sleep"], "description": "Continue independent work, or pause an active goal and finish the turn to await the event."},
@@ -79,7 +79,7 @@ def handle(message: dict) -> dict | None:
         if method == "initialize":
             result = {"protocolVersion": message.get("params", {}).get("protocolVersion", "2024-11-05"),
                       "capabilities": {"tools": {"listChanged": False}},
-                      "serverInfo": {"name": "codex-alarm", "version": "0.1.3"}}
+                      "serverInfo": {"name": "codex-alarm", "version": "0.1.4"}}
         elif method == "ping":
             result = {}
         elif method == "tools/list":

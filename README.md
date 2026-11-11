@@ -29,12 +29,14 @@ Codex's App Server daemon must be running for wakeups. If needed, start it with 
 
 ## Use an alarm
 
-Ask Codex to watch a long job with `codex-alarm`. The plugin gives it MCP tools to arm, list, cancel, and inspect alarms. A checker reports `pending`, `done`, or `error` as JSON. It can inspect a local file or use SSH to check a remote job.
+Ask Codex to watch a long job with `codex-alarm`. The plugin gives it MCP tools to arm, list, cancel, and inspect alarms. A checker reports `pending` while the condition is unresolved, `done` when it needs attention, or `error` when the checker cannot determine its state. It can inspect local or remote state.
 
 - `mode: continue` lets Codex do other work while the checker runs.
 - `mode: sleep` lets Codex finish its turn and wait. If a goal is active, the plugin pauses it and resumes it on wakeup only if it has not changed.
 
 The backup deadline should be later than the expected job duration, with room for normal delays. If it fires while the job is still making progress, Codex can check the job and arm another alarm. The checker and deadline run without model polling turns.
+
+`arm` runs the checker once before registering an alarm or pausing a goal. This initial check must finish within 30 seconds. If it returns `error`, the tool reports the diagnostic and creates no alarm. If it returns `done`, the tool reports `condition_met` immediately and creates no alarm. An armed checker that later fails three times in a row wakes Codex with reason `checker_error`; an intervening `pending` result resets that count. A failed job can still meet a condition such as "the job has ended" and should return `done` so Codex can inspect the failure promptly.
 
 For remote builds, start the build so it survives the SSH connection and writes a durable result, such as an exit-code file. The checker runs on the machine hosting Codex and can read that result over SSH.
 
