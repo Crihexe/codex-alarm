@@ -148,10 +148,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_initial_check_does_not_arm_or_pause_goal(self):
         FakeAppServer.goal_data = {"status": "active", "objective": "Wait for result", "updatedAt": 1}
-        with self.assertRaises(AlarmError) as context:
-            await self.arm("import sys; sys.stderr.write('invalid checker syntax'); sys.exit(2)")
-        self.assertEqual(context.exception.code, "CHECKER_ERROR")
-        self.assertIn("invalid checker syntax", context.exception.reason)
+        for source, diagnostic in (
+            ("import sys; sys.stderr.write('invalid checker syntax'); sys.exit(2)", "invalid checker syntax"),
+            ("print('{\"state\":\"error\",\"detail\":\"cannot inspect job\"}')", "cannot inspect job"),
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                with self.assertRaises(AlarmError) as context:
+                    await self.arm(source)
+                self.assertEqual(context.exception.code, "CHECKER_ERROR")
+                self.assertIn(diagnostic, context.exception.reason)
         self.assertEqual(self.store.list_alarms("chat-a")["alarms"], [])
         self.assertEqual(FakeAppServer.goal_data["status"], "active")
 
